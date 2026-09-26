@@ -6,3 +6,4 @@ data/
 *.env
 evals/runs/
 *.egg-info/
+providers.json

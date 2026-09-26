@@ -7,7 +7,7 @@ measure how well each retrieval configuration ranks the gold locations.
 Runs against a separate data directory and the local vector store so it never touches
 production data or the hosted vector database.
 
-    REVPR_DATA=/root/revpr/data/evaldb QDRANT_URL= \
+    REVPR_DATA=data/evaldb QDRANT_URL= \
         venv/bin/python -m evals.retrieval_eval prepare
     ... run --model jinaai/jina-embeddings-v2-base-code
 """
@@ -24,7 +24,7 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-os.environ.setdefault("REVPR_DATA", "/root/revpr/data/evaldb")
+os.environ.setdefault("REVPR_DATA", str(Path(__file__).resolve().parent.parent / "data" / "evaldb"))
 os.environ["QDRANT_URL"] = ""  # local exact search only
 
 import pyarrow.parquet as pq  # noqa: E402

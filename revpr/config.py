@@ -1,6 +1,6 @@
 """Runtime settings.
 
-Secrets live outside the repository in an env file (default /root/.secrets/code-review.env).
+Secrets live outside the repository in an env file named by REVPR_ENV_FILE (optional).
 Everything else has a default that suits a 4 vCPU / 8 GB host.
 """
 
@@ -11,9 +11,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+ROOT = Path(__file__).resolve().parent.parent
+
+
 def _load_env_file(path: str) -> None:
+    if not path:
+        return
     p = Path(path)
-    if not p.is_file():
+    try:
+        if not p.is_file():
+            return
+    except OSError:
         return
     for line in p.read_text().splitlines():
         line = line.strip()
@@ -23,7 +31,7 @@ def _load_env_file(path: str) -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
-_load_env_file(os.environ.get("REVPR_ENV_FILE", "/root/.secrets/code-review.env"))
+_load_env_file(os.environ.get("REVPR_ENV_FILE", ""))
 
 
 def _int(name: str, default: int) -> int:
@@ -32,12 +40,12 @@ def _int(name: str, default: int) -> int:
 
 @dataclass(frozen=True)
 class Settings:
-    data_dir: Path = Path(os.environ.get("REVPR_DATA", "/root/revpr/data"))
+    data_dir: Path = Path(os.environ.get("REVPR_DATA", str(ROOT / "data")))
     github_token: str = os.environ.get("GITHUB_TOKEN", "")
     qdrant_url: str = os.environ.get("QDRANT_URL", "")
     qdrant_api_key: str = os.environ.get("QDRANT_API_KEY", "")
     qdrant_collection: str = os.environ.get("REVPR_QDRANT_COLLECTION", "revpr_cards_v1")
-    providers_file: str = os.environ.get("REVPR_PROVIDERS", "/root/.secrets/revpr-providers.json")
+    providers_file: str = os.environ.get("REVPR_PROVIDERS", str(ROOT / "providers.json"))
     phoenix_endpoint: str = os.environ.get("REVPR_PHOENIX", "http://127.0.0.1:6006/v1/traces")
 
     embed_model: str = os.environ.get("REVPR_EMBED_MODEL", "jinaai/jina-embeddings-v2-base-code")

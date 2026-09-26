@@ -6,7 +6,7 @@ vendor than the reviewer (to avoid self-preference bias), with a binary valid/in
 a reason, from the code around the cited lines. Labels are exported to CSV with an empty
 `human_label` column; filling a sample of it gives the judge's agreement rate.
 
-    REVPR_DATA=/root/revpr/data/benchdb venv/bin/python -m evals.judge_findings
+    REVPR_DATA=data/benchdb venv/bin/python -m evals.judge_findings
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import json
 import os
 from pathlib import Path
 
-os.environ.setdefault("REVPR_DATA", "/root/revpr/data/benchdb")
+os.environ.setdefault("REVPR_DATA", str(Path(__file__).resolve().parent.parent / "data" / "benchdb"))
 
 from revpr import gitops, tracing  # noqa: E402
 from revpr.llm.client import complete_json, role_label  # noqa: E402

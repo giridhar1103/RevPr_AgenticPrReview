@@ -18,7 +18,7 @@ evidence contradicted the diff and the verifier rightly rejected true findings.)
 Caveat: frontier models may have seen these public fixes during training; the pre/post
 verification comparison and the other-findings rate are less exposed to that than raw detection.
 
-    REVPR_DATA=/root/revpr/data/benchdb QDRANT_URL= \
+    REVPR_DATA=data/benchdb QDRANT_URL= \
         venv/bin/python -m evals.review_bench --tasks 30 [--repeat 3 --only-first 10]
 """
 
@@ -33,7 +33,7 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-os.environ.setdefault("REVPR_DATA", "/root/revpr/data/benchdb")
+os.environ.setdefault("REVPR_DATA", str(Path(__file__).resolve().parent.parent / "data" / "benchdb"))
 os.environ["QDRANT_URL"] = ""
 
 import pyarrow.parquet as pq  # noqa: E402
