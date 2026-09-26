@@ -152,7 +152,8 @@ def _command(p: dict, system: str, prompt: str, schema: dict | None) -> LLMResul
             raise LLMError(f"unparseable runtime output: {(proc.stderr or proc.stdout)[:300]}") \
                 from e
         if d.get("is_error"):
-            raise LLMError(str(d.get("result"))[:300])
+            raise LLMError(f"{d.get('subtype')} status={d.get('api_error_status')}: "
+                           f"{str(d.get('result'))[:300]}")
         text = d.get("result", "")
         if isinstance(d.get("structured_output"), (dict, list)):
             text = json.dumps(d["structured_output"])
@@ -173,7 +174,8 @@ _IMPL: dict[str, Callable[[dict, str, str, dict | None], LLMResult]] = {
 
 # -- public API ---------------------------------------------------------------------------
 
-def complete(role: str, system: str, prompt: str, schema: dict | None = None) -> LLMResult:
+def complete(role: str, system: str, prompt: str, schema: dict | None = None,
+             enforce_schema: bool = True) -> LLMResult:
     cfg = config()
     pid = cfg["roles"].get(role, cfg["roles"].get("default"))
     p = cfg["providers"][pid]
@@ -181,8 +183,18 @@ def complete(role: str, system: str, prompt: str, schema: dict | None = None) ->
         s.set("llm.model_name", p.get("label", pid))
         s.set("llm.provider", p.get("vendor", "unknown"))
         s.set("llm.system", system[:2000])
-        with _sema:
-            res = _IMPL[p["type"]](p, system, prompt, schema)
+        res = None
+        for attempt in range(3):
+            try:
+                with _sema:
+                    res = _IMPL[p["type"]](p, system, prompt,
+                                           schema if enforce_schema else None)
+                break
+            except LLMError as e:
+                s.set(f"retry_{attempt + 1}", str(e)[:300])
+                if attempt == 2 or "structured_output" in str(e):
+                    raise
+                time.sleep(5 * (attempt + 1) ** 2)
         s.output(res.text[:8000])
         if res.tokens_in is not None:
             s.set("llm.token_count.prompt", res.tokens_in)
@@ -216,7 +228,14 @@ def complete_json(role: str, system: str, prompt: str, schema: dict,
         p = prompt if attempt == 0 else (
             prompt + f"\n\nYour previous reply was invalid: {last_err}\n"
                      "Reply again with one JSON object that matches the schema.")
-        res = complete(role, system, p, schema)
+        try:
+            res = complete(role, system, p, schema)
+        except LLMError as e:
+            if "structured_output" not in str(e):
+                raise
+            # The runtime could not satisfy the schema; ask again without enforcement and
+            # validate the parsed JSON ourselves.
+            res = complete(role, system, p, schema, enforce_schema=False)
         try:
             obj = extract_json(res.text)
             return (validate(obj) if validate else obj), res

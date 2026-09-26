@@ -21,7 +21,7 @@ from .diffparse import Hunk, annotate_patch, changed_new_lines, in_hunks, number
 from .evidence import EvidenceStore
 from .prompts import (REVIEW_SCHEMA, REVIEW_SYSTEM, SEVERITIES, VERIFY_SCHEMA, VERIFY_SYSTEM)
 
-PIPELINE_VERSION = "pr-1"
+PIPELINE_VERSION = "pr-2"
 MAX_ROUNDS = 2
 MAX_REQUESTS = 3
 CONTEXT_BUDGET = 70_000

@@ -56,10 +56,19 @@ def encode_query(text: str) -> np.ndarray:
     return encode([text[: settings.card_chars * 2]])[0]
 
 
+RERANK_QUERY_CHARS = 500
+RERANK_DOC_CHARS = 900
+RERANK_BATCH = 8
+
+
 def rerank(query: str, docs: list[str]) -> list[float]:
+    """Cross-encoder scores. Inputs are capped and batched small: attention memory grows with
+    the square of sequence length, and one batch of 40 long pairs used 2.5 GB."""
     if not docs:
         return []
-    return [float(s) for s in reranker().rerank(query, docs)]
+    q = query[:RERANK_QUERY_CHARS]
+    capped = [d[:RERANK_DOC_CHARS] for d in docs]
+    return [float(s) for s in reranker().rerank(q, capped, batch_size=RERANK_BATCH)]
 
 
 def cached_vectors(hashes: list[str]) -> dict[str, np.ndarray]:

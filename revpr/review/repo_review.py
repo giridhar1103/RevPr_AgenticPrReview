@@ -19,7 +19,7 @@ from .evidence import EvidenceStore
 from .pr_review import SEVERITIES, verify
 from .prompts import HOTSPOT_SCHEMA, HOTSPOT_SYSTEM, UNTRUSTED
 
-PIPELINE_VERSION = "repo-1"
+PIPELINE_VERSION = "repo-2"
 HOTSPOT_REVIEWS = 3
 MAX_FILE_CHARS = 36_000
 
