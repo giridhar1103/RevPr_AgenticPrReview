@@ -1,0 +1,21 @@
+[project]
+name = "revpr"
+version = "0.1.0"
+description = "Repository-aware review of GitHub pull requests and repositories"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi", "uvicorn[standard]", "pydantic", "httpx", "sse-starlette",
+    "tree-sitter", "tree-sitter-language-pack", "fastembed", "qdrant-client", "numpy",
+    "arize-phoenix-otel", "openinference-semantic-conventions", "opentelemetry-sdk",
+    "opentelemetry-exporter-otlp", "ruff",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
