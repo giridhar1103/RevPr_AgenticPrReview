@@ -10,7 +10,7 @@ import traceback
 from . import db, embed, jobs, tracing
 from .config import settings
 from .github import GitHubError
-from .indexer import IndexError_
+from .indexer import IndexError_, delete_snapshot
 from .llm.client import LLMError
 from .review.ask import ask
 from .review.pr_review import ReviewError, review_pr
@@ -100,10 +100,7 @@ def evict() -> None:
     for r in old:
         sid = r["id"]
         store.delete_snapshot(sid)
-        with db.transaction(conn):
-            conn.execute("DELETE FROM chunks_fts WHERE rowid IN "
-                         "(SELECT id FROM chunks WHERE snapshot_id = ?)", (sid,))
-            conn.execute("DELETE FROM snapshots WHERE id = ?", (sid,))
+        delete_snapshot(sid)
         log.info("evicted snapshot %s", sid)
 
 
