@@ -16,6 +16,13 @@ from .prompts import ANSWER_SCHEMA, ANSWER_SYSTEM
 Progress = Callable[[str, dict], None]
 
 
+def _validate_answer(obj: dict) -> dict:
+    # A one-word reply has happened once in production; treat it as invalid so it is retried.
+    if len((obj.get("answer") or "").split()) < 8:
+        raise ValueError("answer is too short to be a real answer")
+    return obj
+
+
 def ask(snapshot_id: int, question: str, progress: Progress | None = None) -> dict:
     emit = progress or (lambda stage, data: None)
     t0 = time.monotonic()
@@ -44,7 +51,8 @@ def ask(snapshot_id: int, question: str, progress: Progress | None = None) -> di
                           + "\n".join(e.render() for e in ev.items))
                 if rnd == 1:
                     prompt += "\n\nMore evidence was added for your requests. Answer now."
-                obj, _ = complete_json("answer", ANSWER_SYSTEM, prompt, ANSWER_SCHEMA)
+                obj, _ = complete_json("answer", ANSWER_SYSTEM, prompt, ANSWER_SCHEMA,
+                                       _validate_answer)
                 reqs = obj.get("requests") or []
                 if rnd == 1 or not reqs:
                     break

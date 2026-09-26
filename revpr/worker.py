@@ -73,6 +73,8 @@ def _compact(steps: list[dict]) -> list[dict]:
             rec["input"] = s["input"] if isinstance(s["input"], str) else str(s["input"])
         if "documents" in s:
             rec["documents"] = s["documents"][:12]
+        if s.get("kind") == "LLM" and isinstance(s.get("output"), str):
+            rec["output"] = s["output"][:1500]
         if "error" in s:
             rec["error"] = s["error"]
         out.append(rec)
