@@ -36,7 +36,8 @@ def ask(snapshot_id: int, question: str, progress: Progress | None = None) -> di
     with span("ask", "AGENT", input=question, repo=row["full_name"]) as root:
         with gitops.repo_lock(row["full_name"]):
             gitops.checkout(rdir, row["sha"])
-            ev = EvidenceStore(snapshot_id, rdir, row["sha"], store=store)
+            ev = EvidenceStore(snapshot_id, rdir, row["sha"], store=store,
+                               on_add=lambda e: emit("evidence", e.brief()))
             emit("retrieve", {})
             hits = retrieval.search(snapshot_id, question, k=8, store=store, use_rerank=True)
             for h in hits:

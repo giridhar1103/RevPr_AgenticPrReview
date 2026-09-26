@@ -37,7 +37,7 @@ class Evidence:
                 "end": self.end, "reason": self.reason, "source": self.source}
 
 
-@dataclass
+@dataclass(eq=False)
 class EvidenceStore:
     snapshot_id: int
     repo_dir: Path
@@ -47,6 +47,7 @@ class EvidenceStore:
     seen_spans: set[tuple[str, int, int]] = field(default_factory=set)
     seen_chunks: set[int] = field(default_factory=set)
     store: object | None = None  # vector store for search
+    on_add: object | None = None  # called with each new item, for live progress
 
     def add(self, kind: str, path: str, start: int | None, end: int | None, text: str,
             reason: str, source: str = "base", dedupe: bool = True,
@@ -61,6 +62,8 @@ class EvidenceStore:
             text = text[:max_chars] + "\n... [truncated]"
         ev = Evidence(f"E{len(self.items) + 1}", kind, path, start, end, text, reason, source)
         self.items.append(ev)
+        if self.on_add is not None:
+            self.on_add(ev)
         return ev
 
     def get(self, eid: str) -> Evidence | None:

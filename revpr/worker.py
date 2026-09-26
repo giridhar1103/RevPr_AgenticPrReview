@@ -33,6 +33,30 @@ def _handle(sig, frame):  # noqa: ARG001
 USER_ERRORS = (GitHubError, IndexError_, ReviewError, ValueError)
 
 
+STEP_ATTRS = ("hits", "channel_sizes", "backend", "reranked", "candidates", "llm.model_name",
+              "llm.token_count.prompt", "llm.token_count.completion", "llm.cost_usd",
+              "findings", "requests", "evidence", "changed", "error")
+
+
+def step_event(rec: dict) -> dict | None:
+    """Compact, public view of one finished step for the live run page."""
+    if rec.get("kind") == "AGENT":
+        return None
+    out = {"name": rec.get("name"), "kind": rec.get("kind"), "ms": rec.get("ms")}
+    inp = rec.get("input")
+    if isinstance(inp, str) and rec.get("kind") in ("RETRIEVER", "RERANKER", "TOOL"):
+        out["input"] = inp[:160]
+    elif inp is not None and rec.get("kind") == "TOOL":
+        out["input"] = str(inp)[:160]
+    attrs = rec.get("attrs") or {}
+    out["attrs"] = {k: attrs[k] for k in STEP_ATTRS if k in attrs}
+    docs = rec.get("documents") or []
+    if docs:
+        out["documents"] = [{"path": d.get("path"), "lines": d.get("lines"),
+                             "ranks": d.get("ranks")} for d in docs[:6]]
+    return out
+
+
 def run_job(job: dict) -> None:
     job_id = job["id"]
     payload = jobs.get(job_id)["input"]
@@ -40,7 +64,13 @@ def run_job(job: dict) -> None:
     def progress(stage: str, data: dict) -> None:
         jobs.event(job_id, stage, data)
 
-    with tracing.job_trace() as steps:
+    def on_step(rec: dict) -> None:
+        ev = step_event(rec)
+        if ev is not None:
+            jobs.event(job_id, "step", ev)
+
+    jobs.event(job_id, "started", {})
+    with tracing.job_trace(on_step) as steps:
         try:
             if job["kind"] == "pr_review":
                 result = review_pr(payload["url"], progress)

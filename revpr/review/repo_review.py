@@ -241,6 +241,8 @@ def review_repo(url: str, progress: Progress | None = None) -> dict:
         hot = hotspots(snap.id)
         coupling = hidden_coupling(snap.id)
         gaps = test_gaps(snap.id)
+        emit("analyzed", {"hotspots": [h["path"] for h in hot[:5]], "coupled_pairs": len(coupling),
+                          "test_gaps": len(gaps)})
         stats = json.loads(db.get().execute("SELECT stats FROM snapshots WHERE id = ?",
                                             (snap.id,)).fetchone()["stats"])
 
@@ -304,5 +306,5 @@ def review_repo(url: str, progress: Progress | None = None) -> dict:
                           (snap.id,)).fetchone()[0], "chunks": stats.get("chunks")}},
         }
         root.output({"findings": len(confirmed), "hotspots": len(hot)})
-        emit("done", {"findings": len(confirmed)})
+        emit("done", {"findings": len(confirmed), "total_s": result["stats"]["total_s"]})
         return result

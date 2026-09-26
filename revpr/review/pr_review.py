@@ -401,7 +401,9 @@ def review_pr(url: str, progress: Progress | None = None) -> dict:
         files, notes = admit(pr)
         hunks = {f.path: parse_patch(f.patch) for f in files}
         emit("fetched", {"title": pr.title, "files": len(files), "additions": pr.additions,
-                         "deletions": pr.deletions})
+                         "deletions": pr.deletions, "author": pr.author,
+                         "paths": [f"{f.path} (+{f.additions} -{f.deletions})"
+                                   for f in files[:12]], "notes": notes})
         t = lap("fetch", t)
 
         emit("index", {"sha": pr.base_sha[:10]})
@@ -443,16 +445,22 @@ def review_change(pr: PRInfo, files: list[PRFile], hunks: dict[str, list[Hunk]],
     t = time.monotonic()
     with span("review_change", "CHAIN", input=pr.title) as root:
         store = get_store()
-        ev = EvidenceStore(snap.id, rdir, pr.base_sha, head, store=store)
+        ev = EvidenceStore(snap.id, rdir, pr.base_sha, head, store=store,
+                           on_add=lambda e: emit("evidence", e.brief()))
 
         # Embed the neighbourhood of the change first so dense search covers it.
-        emit("embed", {})
+        emit("embed", {"budget_s": 12})
         _prioritize(snap.id, [f.previous_path or f.path for f in files])
-        embed.embed_pending(snap.id, 96, store, time_budget_s=12, min_priority=5.0)
+        n_embedded = embed.embed_pending(snap.id, 96, store, time_budget_s=12, min_priority=5.0)
         t = lap("embed", t)
+        emit("embedded", {"new": n_embedded, "seconds": timings["embed"],
+                          **_dense_coverage(snap.id)})
 
         emit("context", {})
         changed = _changed_symbols(ev, files, hunks, head)
+        emit("changed_symbols", {"symbols": [
+            {"name": c.qualname, "path": c.path, "status": c.status, "lines": c.changed_lines}
+            for c in changed[:15]]})
         _build_context(ev, pr, files, changed, head)
         lines_by_path = {f.path: changed_new_lines(hunks[f.path]) for f in files}
         analyzer_items = analyzers.ruff({p: head[p] for p in head}, lines_by_path)
@@ -479,6 +487,10 @@ def review_change(pr: PRInfo, files: list[PRFile], hunks: dict[str, list[Hunk]],
             rounds.append({"round": rnd + 1, "findings": len(draft["findings"]),
                            "requests": draft["requests"][:MAX_REQUESTS],
                            "latency_ms": res.latency_ms, "prompt_chars": len(prompt)})
+            emit("review_done", {"round": rnd + 1, "seconds": round(res.latency_ms / 1000, 1),
+                                 "candidates": len(draft["findings"]),
+                                 "requests": len(draft["requests"]),
+                                 "tokens_in": res.tokens_in, "tokens_out": res.tokens_out})
             if not draft["requests"] or rnd == MAX_ROUNDS:
                 break
             new_ids = []
@@ -496,7 +508,16 @@ def review_change(pr: PRInfo, files: list[PRFile], hunks: dict[str, list[Hunk]],
 
         emit("verify", {"candidates": len(draft["findings"])})
         kept, dropped = ground(draft["findings"], files, hunks, head, ev)
+        emit("grounded", {"kept": len(kept), "dropped": len(dropped),
+                          "reasons": [f["grounding"]["problems"][0] for f in dropped
+                                      if f["grounding"]["problems"]][:5]})
         verdicts = verify(kept, files, hunks, ev) if kept else {}
+        emit("verified", {"confirmed": sum(v.get("verdict") == "confirmed"
+                                           for v in verdicts.values()),
+                          "rejected": sum(v.get("verdict") == "rejected"
+                                          for v in verdicts.values()),
+                          "uncertain": len(kept) - sum(v.get("verdict") in ("confirmed", "rejected")
+                                                       for v in verdicts.values())})
         final, hidden = [], []
         for f in kept:
             v = verdicts.get(f["id"])
@@ -549,7 +570,8 @@ def review_change(pr: PRInfo, files: list[PRFile], hunks: dict[str, list[Hunk]],
         }
         result["markdown"] = to_markdown(result)
         root.output({"findings": len(final), "hidden": len(hidden)})
-        emit("done", {"findings": len(final)})
+        emit("done", {"findings": len(final), "total_s": result["stats"]["total_s"],
+                      "cost_usd": result["stats"]["cost_usd"]})
         return result
 
 

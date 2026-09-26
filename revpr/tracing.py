@@ -26,6 +26,8 @@ OUTPUT = "output.value"
 
 _tracer = None
 _job_trace: ContextVar[list | None] = ContextVar("job_trace", default=None)
+# Called with each finished step so progress can be streamed while a job runs.
+_on_step: ContextVar[object | None] = ContextVar("on_step", default=None)
 
 
 def init(project: str = "revpr") -> None:
@@ -49,13 +51,15 @@ def tracer():
 
 
 @contextmanager
-def job_trace() -> Iterator[list]:
+def job_trace(on_step=None) -> Iterator[list]:
     steps: list = []
     token = _job_trace.set(steps)
+    cb_token = _on_step.set(on_step)
     try:
         yield steps
     finally:
         _job_trace.reset(token)
+        _on_step.reset(cb_token)
 
 
 def _clip(value: Any, n: int = 4000) -> str:
@@ -117,3 +121,9 @@ def span(name: str, kind: str = "CHAIN", input: Any = None, **attrs: Any) -> Ite
             record["ms"] = int((time.time() - record["start"]) * 1000)
             if parent is not None:
                 parent.append(record)
+            cb = _on_step.get()
+            if cb is not None:
+                try:
+                    cb(record)
+                except Exception:  # noqa: BLE001  progress must never break a job
+                    log.debug("step callback failed", exc_info=True)
