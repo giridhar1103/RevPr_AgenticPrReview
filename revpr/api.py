@@ -103,13 +103,23 @@ class AskIn(BaseModel):
     question: str = Field(min_length=4, max_length=500)
 
 
+def _typical_seconds(kind: str) -> int | None:
+    """Median duration of recent finished jobs of this kind, used for the progress estimate."""
+    rows = db.get().execute(
+        "SELECT finished_at - started_at AS s FROM jobs WHERE kind = ? AND status = 'done' "
+        "AND started_at IS NOT NULL ORDER BY finished_at DESC LIMIT 25", (kind,)).fetchall()
+    vals = sorted(r["s"] for r in rows if r["s"] and r["s"] > 5)
+    return int(vals[len(vals) // 2]) if vals else None
+
+
 def _job_view(job_id: str) -> dict:
     job = jobs.get(job_id)
     if job is None:
         raise HTTPException(404, "unknown job")
     view = {"id": job["id"], "kind": job["kind"], "status": job["status"],
             "input": job["input"], "error": job["error"], "created_at": job["created_at"],
-            "finished_at": job["finished_at"]}
+            "started_at": job["started_at"], "finished_at": job["finished_at"],
+            "typical_s": _typical_seconds(job["kind"])}
     if job["status"] == "queued":
         view["position"] = jobs.queue_position(job_id)
     if job["status"] == "done":
@@ -202,6 +212,7 @@ async def job_events(job_id: str, request: Request):
     async def gen():
         after = 0
         started = time.monotonic()
+        last_position = None
         while time.monotonic() - started < 1200:
             if await request.is_disconnected():
                 return
@@ -209,6 +220,11 @@ async def job_events(job_id: str, request: Request):
                 after = ev["id"]
                 yield {"event": "progress", "data": json.dumps(ev)}
             status = jobs.get(job_id)["status"]
+            if status == "queued":
+                pos = jobs.queue_position(job_id)
+                if pos != last_position:
+                    last_position = pos
+                    yield {"event": "queue", "data": json.dumps({"position": pos + 1})}
             if status in ("done", "failed"):
                 yield {"event": "end", "data": json.dumps({"status": status})}
                 return
