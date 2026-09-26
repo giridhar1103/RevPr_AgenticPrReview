@@ -102,7 +102,6 @@ def index_snapshot(full_name: str, sha: str, meta: dict | None = None,
             gitops.checkout(repo, sha)
             t = lap("clone", t)
 
-            _set_stage(snap.id, "indexing", "parse")
             candidates: list[tuple[str, str]] = []
             for rel, full in gitops.iter_source_files(repo):
                 lang, _ = detect(rel)
@@ -113,15 +112,26 @@ def index_snapshot(full_name: str, sha: str, meta: dict | None = None,
                 raise IndexError_(
                     f"Repository has {len(parsed_langs)} source files; the limit is "
                     f"{settings.max_source_files}.")
-            emit("parse", {"files": len(candidates)})
-            with ProcessPoolExecutor(max_workers=3) as pool:
-                files = [f for f in pool.map(_parse_one, candidates, chunksize=16)
-                         if f is not None]
-            t = lap("parse", t)
-
             _set_stage(snap.id, "indexing", "history")
             hist = history.collect(repo, sha)
             t = lap("history", t)
+
+            # Parse in worker processes and write each file as it arrives, dropping chunk text
+            # right away so memory stays flat on large repositories.
+            _set_stage(snap.id, "indexing", "parse")
+            emit("parse", {"files": len(candidates)})
+            writer = _Writer(snap.id, hist)
+            files: list[ParsedFile] = []
+            with ProcessPoolExecutor(max_workers=3) as pool:
+                # Bounded slices keep finished-but-unwritten results from piling up.
+                for i in range(0, len(candidates), 400):
+                    for pf in pool.map(_parse_one, candidates[i:i + 400], chunksize=16):
+                        if pf is None:
+                            continue
+                        writer.add(pf, is_test_path(pf.path))
+                        files.append(pf)
+            writer.flush()
+            t = lap("parse", t)
 
         is_test = [is_test_path(f.path) for f in files]
 
@@ -138,15 +148,15 @@ def index_snapshot(full_name: str, sha: str, meta: dict | None = None,
         ranks = pagerank(len(files), [(s, d, w) for (s, d), w in file_edges.items()])
 
         _set_stage(snap.id, "indexing", "store")
-        emit("store", {"chunks": sum(len(f.chunks) for f in files)})
-        _store(snap, files, is_test, edges, ranks, hist)
+        emit("store", {"chunks": writer.chunks})
+        _store_graph(snap.id, files, writer, edges, ranks, hist)
         t = lap("store", t)
 
         stats = {
             "files": len(files),
             "parsed_files": sum(1 for f in files if f.symbols),
             "symbols": sum(len(f.symbols) for f in files),
-            "chunks": sum(len(f.chunks) for f in files),
+            "chunks": writer.chunks,
             "edges": len(edges.edges),
             "commits": hist.commits,
             "languages": _lang_breakdown(files),
@@ -193,83 +203,109 @@ def _clear_snapshot(snapshot_id: int) -> None:
                      (snapshot_id,))
 
 
-def _store(snap: SnapshotRef, files: list[ParsedFile], is_test: list[bool], edges,
-           ranks: list[float], hist: history.HistoryStats) -> None:
+class _Writer:
+    """Streams parsed files into SQLite in batched transactions."""
+
+    BATCH = 200
+
+    def __init__(self, snapshot_id: int, hist: history.HistoryStats):
+        self.sid = snapshot_id
+        self.token = f"s{snapshot_id}"
+        self.hist = hist
+        self.pending: list[tuple[ParsedFile, bool]] = []
+        self.file_ids: list[int] = []
+        self.module_ids: list[int] = []
+        self.sym_ids: list[list[int]] = []
+        self.chunks = 0
+
+    def add(self, pf: ParsedFile, is_test: bool) -> None:
+        # Keep chunk text only until the batch is written.
+        self.pending.append((pf, is_test))
+        if len(self.pending) >= self.BATCH:
+            self.flush()
+
+    def flush(self) -> None:
+        if not self.pending:
+            return
+        conn = db.get()
+        h = self.hist
+        with db.transaction(conn):
+            for pf, is_test in self.pending:
+                cur = conn.execute(
+                    "INSERT INTO files (snapshot_id, path, lang, loc, complexity, is_test, churn, "
+                    "churn_recent, authors, last_commit_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (self.sid, pf.path, pf.lang, pf.loc, pf.complexity, int(is_test),
+                     h.churn.get(pf.path, 0), h.churn_recent.get(pf.path, 0),
+                     len(h.authors.get(pf.path, ())), h.last_commit.get(pf.path)))
+                fid = cur.lastrowid
+                mid = conn.execute(
+                    "INSERT INTO symbols (snapshot_id, file_id, name, qualname, kind, start_line, "
+                    "end_line, signature, parent_id) VALUES (?, ?, ?, ?, 'module', 1, ?, NULL, "
+                    "NULL)", (self.sid, fid, pf.path.rsplit("/", 1)[-1], pf.path,
+                              max(pf.loc, 1))).lastrowid
+                ids: list[int] = []
+                for s in pf.symbols:
+                    parent = ids[s.parent] if s.parent is not None else mid
+                    ids.append(conn.execute(
+                        "INSERT INTO symbols (snapshot_id, file_id, name, qualname, kind, "
+                        "start_line, end_line, signature, parent_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (self.sid, fid, s.name, s.qualname, s.kind, s.start_line, s.end_line,
+                         s.signature, parent)).lastrowid)
+                for ch in pf.chunks:
+                    sym = ids[ch.symbol] if ch.symbol is not None else None
+                    cid = conn.execute(
+                        "INSERT INTO chunks (snapshot_id, file_id, start_line, end_line, "
+                        "symbol_id, header, text, card, card_hash) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (self.sid, fid, ch.start_line, ch.end_line, sym, ch.header, ch.text,
+                         ch.card, ch.card_hash)).lastrowid
+                    conn.execute(
+                        "INSERT INTO chunks_fts (rowid, snap, idents, body) VALUES (?, ?, ?, ?)",
+                        (cid, self.token, identifier_terms(ch.header + "\n" + ch.text),
+                         ch.header + "\n" + ch.text))
+                    self.chunks += 1
+                self.file_ids.append(fid)
+                self.module_ids.append(mid)
+                self.sym_ids.append(ids)
+                pf.chunks = []  # written; free the text
+        self.pending = []
+
+
+def _store_graph(sid: int, files: list[ParsedFile], w: _Writer, edges, ranks: list[float],
+                 hist: history.HistoryStats) -> None:
     conn = db.get()
-    sid = snap.id
-    snap_token = f"s{sid}"
     max_rank = max(ranks) if ranks else 1.0
+
+    def node(fi: int, si: int | None) -> int:
+        return w.sym_ids[fi][si] if si is not None else w.module_ids[fi]
+
+    rows: dict[tuple[str, int, int], tuple[float, int | None]] = {}
+    for kind, sf, ss, df, ds, wt, line in edges.edges:
+        key = (kind, node(sf, ss), node(df, ds))
+        if key[1] == key[2]:
+            continue
+        prev = rows.get(key)
+        if prev is None or wt > prev[0]:
+            rows[key] = (wt, line)
+    path_idx = {f.path: i for i, f in enumerate(files)}
+    for (a, b), n in hist.cochange.items():
+        ia, ib = path_idx.get(a), path_idx.get(b)
+        if ia is None or ib is None:
+            continue
+        denom = max(1, min(hist.churn.get(a, 1), hist.churn.get(b, 1)))
+        wt = round(n / denom, 3)
+        rows[("cochange", w.module_ids[ia], w.module_ids[ib])] = (wt, n)
+        rows[("cochange", w.module_ids[ib], w.module_ids[ia])] = (wt, n)
+
     with db.transaction(conn):
-        file_ids: list[int] = []
-        module_ids: list[int] = []
-        sym_ids: list[list[int]] = []
-        for i, f in enumerate(files):
-            cur = conn.execute(
-                "INSERT INTO files (snapshot_id, path, lang, loc, complexity, is_test, churn, "
-                "churn_recent, authors, last_commit_at, pagerank) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (sid, f.path, f.lang, f.loc, f.complexity, int(is_test[i]),
-                 hist.churn.get(f.path, 0), hist.churn_recent.get(f.path, 0),
-                 len(hist.authors.get(f.path, ())), hist.last_commit.get(f.path),
-                 ranks[i] / max_rank if ranks else 0))
-            fid = cur.lastrowid
-            file_ids.append(fid)
-            mcur = conn.execute(
-                "INSERT INTO symbols (snapshot_id, file_id, name, qualname, kind, start_line, "
-                "end_line, signature, parent_id) VALUES (?, ?, ?, ?, 'module', 1, ?, NULL, NULL)",
-                (sid, fid, f.path.rsplit("/", 1)[-1], f.path, max(f.loc, 1)))
-            module_ids.append(mcur.lastrowid)
-            ids: list[int] = []
-            for s in f.symbols:
-                parent = ids[s.parent] if s.parent is not None else module_ids[-1]
-                c = conn.execute(
-                    "INSERT INTO symbols (snapshot_id, file_id, name, qualname, kind, "
-                    "start_line, end_line, signature, parent_id) VALUES (?,?,?,?,?,?,?,?,?)",
-                    (sid, fid, s.name, s.qualname, s.kind, s.start_line, s.end_line,
-                     s.signature, parent))
-                ids.append(c.lastrowid)
-            sym_ids.append(ids)
-
-            base_priority = ranks[i] / max_rank if ranks else 0.0
-            if is_test[i]:
-                base_priority *= 0.3
-            if not f.symbols:
-                base_priority *= 0.5
-            for ch in f.chunks:
-                sym = ids[ch.symbol] if ch.symbol is not None else None
-                cc = conn.execute(
-                    "INSERT INTO chunks (snapshot_id, file_id, start_line, end_line, symbol_id, "
-                    "header, text, card, card_hash, priority) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (sid, fid, ch.start_line, ch.end_line, sym, ch.header, ch.text, ch.card,
-                     ch.card_hash, base_priority))
-                conn.execute(
-                    "INSERT INTO chunks_fts (rowid, snap, idents, body) VALUES (?, ?, ?, ?)",
-                    (cc.lastrowid, snap_token, identifier_terms(ch.header + "\n" + ch.text),
-                     ch.header + "\n" + ch.text))
-
-        def node(fi: int, si: int | None) -> int:
-            return sym_ids[fi][si] if si is not None else module_ids[fi]
-
-        rows: dict[tuple[str, int, int], tuple[float, int | None]] = {}
-        for kind, sf, ss, df, ds, w, line in edges.edges:
-            key = (kind, node(sf, ss), node(df, ds))
-            if key[1] == key[2]:
-                continue
-            prev = rows.get(key)
-            if prev is None or w > prev[0]:
-                rows[key] = (w, line)
-
-        path_idx = {f.path: i for i, f in enumerate(files)}
-        for (a, b), n in hist.cochange.items():
-            ia, ib = path_idx.get(a), path_idx.get(b)
-            if ia is None or ib is None:
-                continue
-            denom = max(1, min(hist.churn.get(a, 1), hist.churn.get(b, 1)))
-            w = round(n / denom, 3)
-            rows[("cochange", module_ids[ia], module_ids[ib])] = (w, n)
-            rows[("cochange", module_ids[ib], module_ids[ia])] = (w, n)
-
         conn.executemany(
             "INSERT OR REPLACE INTO edges (snapshot_id, kind, src, dst, weight, line) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            [(sid, k, s, d, w, ln) for (k, s, d), (w, ln) in rows.items()])
+            [(sid, k, s, d, wt, ln) for (k, s, d), (wt, ln) in rows.items()])
+        conn.executemany("UPDATE files SET pagerank = ? WHERE id = ?",
+                         [(ranks[i] / max_rank if ranks else 0, fid)
+                          for i, fid in enumerate(w.file_ids)])
+        # Embedding priority: central files first, tests and non-code later.
+        conn.execute(
+            "UPDATE chunks SET priority = (SELECT f.pagerank * CASE WHEN f.is_test THEN 0.3 "
+            "ELSE 1.0 END FROM files f WHERE f.id = chunks.file_id) * CASE WHEN "
+            "chunks.symbol_id IS NULL THEN 0.5 ELSE 1.0 END WHERE snapshot_id = ?", (sid,))
