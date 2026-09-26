@@ -173,6 +173,12 @@ def _lang_breakdown(files: list[ParsedFile]) -> dict[str, int]:
     return dict(sorted(out.items(), key=lambda kv: -kv[1])[:8])
 
 
+def delete_snapshot(snapshot_id: int) -> None:
+    """Remove a snapshot and everything derived from it (vectors are removed by the caller)."""
+    _clear_snapshot(snapshot_id)
+    db.get().execute("DELETE FROM snapshots WHERE id = ?", (snapshot_id,))
+
+
 def _clear_snapshot(snapshot_id: int) -> None:
     conn = db.get()
     with db.transaction(conn):

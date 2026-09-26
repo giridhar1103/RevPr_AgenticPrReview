@@ -383,7 +383,6 @@ def review_pr(url: str, progress: Progress | None = None) -> dict:
     emit = progress or (lambda stage, data: None)
     t0 = time.monotonic()
     timings: dict[str, float] = {}
-    costs: list[float] = []
 
     def lap(name: str, since: float) -> float:
         timings[name] = round(time.monotonic() - since, 2)
@@ -391,7 +390,7 @@ def review_pr(url: str, progress: Progress | None = None) -> dict:
 
     full_name, number = parse_pr_url(url)
     gh = GitHub()
-    with span("pr_review", "AGENT", input=url, repo=full_name, pr=number) as root:
+    with span("pr_review", "AGENT", input=url, repo=full_name, pr=number):
         t = time.monotonic()
         emit("fetch", {"repo": full_name, "pr": number})
         repo = gh.repo(full_name)
@@ -425,6 +424,24 @@ def review_pr(url: str, progress: Progress | None = None) -> dict:
             gitops.checkout(rdir, pr.base_sha)
         t = lap("head", t)
 
+        return review_change(pr, files, hunks, head, snap, rdir, notes, emit, timings, t0)
+
+
+def review_change(pr: PRInfo, files: list[PRFile], hunks: dict[str, list[Hunk]],
+                  head: dict[str, str], snap, rdir, notes: list[str], emit: Progress,
+                  timings: dict[str, float] | None = None, t0: float | None = None) -> dict:
+    """Review one change against an indexed base snapshot. Used for GitHub PRs and for the
+    benchmark, which builds synthetic changes from reverted fixes."""
+    timings = timings if timings is not None else {}
+    t0 = t0 if t0 is not None else time.monotonic()
+    costs: list[float] = []
+
+    def lap(name: str, since: float) -> float:
+        timings[name] = round(time.monotonic() - since, 2)
+        return time.monotonic()
+
+    t = time.monotonic()
+    with span("review_change", "CHAIN", input=pr.title) as root:
         store = get_store()
         ev = EvidenceStore(snap.id, rdir, pr.base_sha, head, store=store)
 
