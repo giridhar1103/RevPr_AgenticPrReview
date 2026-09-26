@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import time
 
@@ -27,6 +28,8 @@ app = FastAPI(title="RevPr", docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://giriworks.com", "https://www.giriworks.com", "http://localhost:5173"],
+    # Cloudflare Pages branch previews. The API is public and cookie-free, so this is safe.
+    allow_origin_regex=r"https://[a-z0-9-]+(\.[a-z0-9-]+)?\.pages\.dev",
     allow_methods=["GET", "POST"], allow_headers=["Content-Type"])
 
 _gh: GitHub | None = None
@@ -44,8 +47,42 @@ def _startup() -> None:
     db.init()
 
 
+# The site proxies API calls through a Cloudflare Pages Function, so those requests reach
+# nginx from Cloudflare's network. The function passes the visitor's address in
+# X-RevPr-Client-IP, which is trusted only when the connection really comes from Cloudflare.
+# Source: https://www.cloudflare.com/ips-v4 and /ips-v6
+CLOUDFLARE_NETS = [ipaddress.ip_network(n) for n in (
+    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+    "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+    "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+    "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22", "2400:cb00::/32", "2606:4700::/32",
+    "2803:f800::/32", "2405:b500::/32", "2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
+)]
+
+
+def _from_cloudflare(addr: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    return any(ip in net for net in CLOUDFLARE_NETS)
+
+
 def _ip(request: Request) -> str:
-    return request.headers.get("x-real-ip") or (request.client.host if request.client else "?")
+    peer = request.headers.get("x-real-ip") or (request.client.host if request.client else "?")
+    forwarded = request.headers.get("x-revpr-client-ip", "").strip()
+    if forwarded and _from_cloudflare(peer):
+        try:
+            return str(ipaddress.ip_address(forwarded))
+        except ValueError:
+            pass
+    return peer
+
+
+def _check_size(size_kb: int) -> None:
+    if size_kb > settings.max_repo_kb:
+        raise HTTPException(413, f"This repository is {size_kb // 1024} MB; the limit is "
+                                 f"{settings.max_repo_kb // 1024} MB.")
 
 
 def _limit(ip: str, kinds: tuple[str, ...], per_hour: int) -> None:
@@ -80,6 +117,12 @@ def _job_view(job_id: str) -> dict:
     return view
 
 
+@app.get("/")
+def root() -> dict:
+    return {"service": "RevPr", "status": "ok",
+            "docs": "https://github.com/giridhar1103/RevPr_AgenticPrReview"}
+
+
 @app.get("/health")
 def health() -> dict:
     row = db.get().execute("SELECT COUNT(*) AS n FROM jobs WHERE status = 'queued'").fetchone()
@@ -97,7 +140,9 @@ def review_pr(body: UrlIn, request: Request) -> dict:
         raise HTTPException(404, "PR not found, or the repository is private.")
     if pr.status_code >= 400:
         raise HTTPException(502, "GitHub did not answer; try again shortly.")
-    head = pr.json()["head"]["sha"]
+    data = pr.json()
+    head = data["head"]["sha"]
+    _check_size(int((data.get("base") or {}).get("repo", {}).get("size") or 0))
     key = f"pr:{repo}#{number}@{head}:{PR_VERSION}"
     cached = jobs.find_cached(key)
     if cached:
@@ -115,6 +160,7 @@ def review_repo(body: UrlIn, request: Request) -> dict:
         info = gh().repo(repo)
     except GitHubError as e:
         raise HTTPException(e.status, str(e)) from e
+    _check_size(info.size_kb)
     key = f"repo:{repo}@{info.head_sha}:{REPO_VERSION}"
     cached = jobs.find_cached(key)
     if cached:

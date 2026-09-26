@@ -106,3 +106,19 @@ def test_url_parsing_is_strict():
 def test_test_path_detection():
     assert is_test_path("tests/test_x.py") and is_test_path("src/a.spec.ts")
     assert not is_test_path("src/contest.py")
+
+
+def test_client_ip_trusts_forwarded_header_only_from_cloudflare():
+    from starlette.requests import Request
+
+    from revpr.api import _ip
+
+    def req(peer, fwd=None):
+        headers = [(b"x-real-ip", peer.encode())]
+        if fwd:
+            headers.append((b"x-revpr-client-ip", fwd.encode()))
+        return Request({"type": "http", "headers": headers, "client": ("127.0.0.1", 1)})
+
+    assert _ip(req("162.158.1.2", "203.0.113.9")) == "203.0.113.9"   # via Cloudflare
+    assert _ip(req("198.51.100.7", "203.0.113.9")) == "198.51.100.7"  # spoof attempt
+    assert _ip(req("162.158.1.2", "not-an-ip")) == "162.158.1.2"
